@@ -1,6 +1,6 @@
-name: Build Bedrock Shader (26.0)
+name: Build Bedrock Shader (26.50)
 
-# Workflow tự tải: shaderc, material vanilla 26.0, source RenderChunk vanilla.
+# Workflow tự tải: shaderc, material vanilla 26.50, source RenderChunk vanilla.
 # Bạn chỉ cần commit project/RenderChunk/shaders/vertex.sc đã gắn hiệu ứng gió
 # (nếu chưa có file này, workflow dùng bản vanilla và đưa ra artifact để bạn sửa).
 
@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
 
 env:
-  LAZURITE_VERSION: "0.8.4"        # hỗ trợ material format 22/23/25 (game 26.0 nằm trong khoảng này)
-  MATERIALS_TAG: "v26.50"          # release của mcpebd/serialized-materials (hiện chỉ có v26.50)
+  LAZURITE_VERSION: "0.10.0"       # bản tạo ra material v26.50; 0.8.4 quá cũ cho 26.40+
+  MATERIALS_TAG: "v26.50"          # tag của mcpebd/serialized-materials (material nằm trong repo, không phải file release)
   CODEBASE_BEFORE: "2026-09-16"   # lấy commit mcbe-shader-codebase gần nhất trước ngày này (materials v26.50 ra 15/09/2026)
   CODEBASE_REF: ""                 # hoặc ghi thẳng commit/tag nếu biết
 
@@ -68,17 +68,13 @@ jobs:
           P=${{ matrix.platform }}
           mkdir -p vanilla/$P
           if ls vanilla/$P/*.material.* >/dev/null 2>&1; then echo "Dùng vanilla/ có sẵn"; exit 0; fi
-          mkdir -p tmp/mat
-          gh release download "$MATERIALS_TAG" -R mcpebd/serialized-materials -D tmp/mat || {
-            echo "::error::Không có release $MATERIALS_TAG. Các release hiện có:"
-            gh release list -R mcpebd/serialized-materials --limit 40; exit 1; }
-          cd tmp/mat
-          for f in *.zip; do [ -e "$f" ] && unzip -o -q "$f" -d "x_${f%.zip}"; done || true
-          for f in *.tar.gz *.tgz; do [ -e "$f" ] && { mkdir -p "x_$f"; tar -xzf "$f" -C "x_$f"; }; done || true
-          cd ../..
-          C=$(find tmp/mat -type f -iname 'RenderChunk*.json' | grep -i "$P" | head -n1 || true)
-          [ -n "$C" ] || C=$(find tmp/mat -type f -iname 'RenderChunk*.json' | head -n1 || true)
-          [ -n "$C" ] || { echo "::error::Không thấy RenderChunk json:"; find tmp/mat; exit 1; }
+          rm -rf tmp/mat
+          # material nằm trong cây thư mục của tag (release không có file đính kèm)
+          git clone -q --depth 1 --branch "$MATERIALS_TAG" https://github.com/mcpebd/serialized-materials.git tmp/mat || {
+            echo "::error::Không có tag $MATERIALS_TAG. Các tag hiện có:"
+            git ls-remote --tags https://github.com/mcpebd/serialized-materials.git; exit 1; }
+          C=$(find tmp/mat -type f -name 'RenderChunk.material.json' -not -path '*/.git/*' | head -n1 || true)
+          [ -n "$C" ] || { echo "::error::Không thấy RenderChunk.material.json:"; ls tmp/mat | head -50; exit 1; }
           echo "Dùng $C"
           cp "$C" vanilla/$P/RenderChunk.material.json
 
