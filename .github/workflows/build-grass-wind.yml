@@ -10,8 +10,8 @@ on:
 
 env:
   LAZURITE_VERSION: "0.8.4"        # hỗ trợ material format 22/23/25 (game 26.0 nằm trong khoảng này)
-  MATERIALS_TAG: "v26.0"           # release của mcpebd/serialized-materials
-  CODEBASE_BEFORE: "2026-02-20"    # lấy commit mcbe-shader-codebase gần nhất trước ngày này (26.0 ra 10/02/2026)
+  MATERIALS_TAG: "v26.50"          # release của mcpebd/serialized-materials (hiện chỉ có v26.50)
+  CODEBASE_BEFORE: "2026-09-16"   # lấy commit mcbe-shader-codebase gần nhất trước ngày này (materials v26.50 ra 15/09/2026)
   CODEBASE_REF: ""                 # hoặc ghi thẳng commit/tag nếu biết
 
 jobs:
