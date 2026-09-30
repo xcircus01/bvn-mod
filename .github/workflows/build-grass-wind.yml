@@ -1,56 +1,43 @@
-name: Build Bedrock Shader (26.50)
-
-# Workflow tự tải: shaderc, material vanilla 26.50, source RenderChunk vanilla.
-# Bạn chỉ cần commit project/RenderChunk/shaders/vertex.sc đã gắn hiệu ứng gió
-# (nếu chưa có file này, workflow dùng bản vanilla và đưa ra artifact để bạn sửa).
+name: Build Bedrock Shader (Android)
 
 on:
   push:
   workflow_dispatch:
 
 env:
-  LAZURITE_VERSION: "0.10.0"       # bản tạo ra material v26.50; 0.8.4 quá cũ cho 26.40+
-  MATERIALS_TAG: "v26.50"          # tag của mcpebd/serialized-materials (material nằm trong repo, không phải file release)
-  CODEBASE_BEFORE: "2026-09-16"   # lấy commit mcbe-shader-codebase gần nhất trước ngày này (materials v26.50 ra 15/09/2026)
-  CODEBASE_REF: ""                 # hoặc ghi thẳng commit/tag nếu biết
+  LAZURITE_VERSION: "0.8.4"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [android, windows]
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Giải nén zip có sẵn trong repo
+      - name: Giai nen zip trong repo
         run: |
           shopt -s nullglob
           zips=(*.zip)
-          [ ${#zips[@]} -gt 0 ] || { echo "Không có file zip ở root repo, bỏ qua"; exit 0; }
+          [ ${#zips[@]} -gt 0 ] || { echo "Khong co file zip o root repo"; exit 1; }
           for z in "${zips[@]}"; do
-            echo "Giải nén $z"
+            echo "Giai nen $z"
             rm -rf "$RUNNER_TEMP/unz" && mkdir -p "$RUNNER_TEMP/unz"
             unzip -o -q "$z" -d "$RUNNER_TEMP/unz" -x '__MACOSX/*'
-            # nếu zip chỉ có 1 thư mục gốc (vd grass-shader/) thì bỏ lớp đó
             mapfile -t top < <(find "$RUNNER_TEMP/unz" -mindepth 1 -maxdepth 1)
             if [ ${#top[@]} -eq 1 ] && [ -d "${top[0]}" ]; then SRC="${top[0]}"; else SRC="$RUNNER_TEMP/unz"; fi
-            # -n: không ghi đè file bạn đã commit (vd vertex.sc đã sửa)
-            cp -a -n "$SRC"/. .
+            cp -a "$SRC"/. .
           done
-          echo "Cấu trúc sau khi giải nén:"; ls -la; find project vanilla -maxdepth 3 2>/dev/null | head -50
+          find project vanilla manifest.json pack_icon.png -maxdepth 3
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Cài lazurite
+      - name: Cai lazurite
         run: pip install "lazurite==$LAZURITE_VERSION"
 
-      - name: Tải shaderc
+      - name: Tai shaderc
         run: |
           mkdir -p tools/dl && cd tools/dl
           gh release download binaries -R veka0/bgfx-mcbe
@@ -60,69 +47,33 @@ jobs:
           while IFS= read -r c; do
             if file "$c" | grep -q "ELF 64-bit.*x86-64"; then S="$c"; break; fi
           done < <(find . -type f -iname 'shaderc*')
-          [ -n "$S" ] || { echo "Không thấy shaderc Linux:"; find .; exit 1; }
+          [ -n "$S" ] || { echo "Khong thay shaderc Linux:"; find .; exit 1; }
           cp "$S" ../shaderc && chmod +x ../shaderc
 
-      - name: Tải material vanilla (nếu vanilla/ chưa có)
+      - name: Lay bgfx_shader.sh
         run: |
-          P=${{ matrix.platform }}
-          mkdir -p vanilla/$P
-          if ls vanilla/$P/*.material.* >/dev/null 2>&1; then echo "Dùng vanilla/ có sẵn"; exit 0; fi
-          rm -rf tmp/mat
-          # material nằm trong cây thư mục của tag (release không có file đính kèm)
-          git clone -q --depth 1 --branch "$MATERIALS_TAG" https://github.com/mcpebd/serialized-materials.git tmp/mat || {
-            echo "::error::Không có tag $MATERIALS_TAG. Các tag hiện có:"
-            git ls-remote --tags https://github.com/mcpebd/serialized-materials.git; exit 1; }
-          C=$(find tmp/mat -type f -name 'RenderChunk.material.json' -not -path '*/.git/*' | head -n1 || true)
-          [ -n "$C" ] || { echo "::error::Không thấy RenderChunk.material.json:"; ls tmp/mat | head -50; exit 1; }
-          echo "Dùng $C"
-          cp "$C" vanilla/$P/RenderChunk.material.json
+          [ -f project/include/bgfx_shader.sh ] && exit 0
+          curl -fsSL -o project/include/bgfx_shader.sh https://raw.githubusercontent.com/SurvivalApparatusCommunity/RenderDragonSourceCodeInv/1.20.60/include/bgfx_shader.sh
 
-      - name: Lấy source RenderChunk vanilla (nếu chưa có vertex.sc)
+      - name: Kiem tra material
         run: |
-          S=project/RenderChunk/shaders
-          mkdir -p $S
-          if [ -f $S/vertex.sc ]; then echo "Dùng vertex.sc của bạn"; exit 0; fi
-          git clone -q https://github.com/veka0/mcbe-shader-codebase.git tmp/code
-          cd tmp/code
-          if [ -n "$CODEBASE_REF" ]; then REF="$CODEBASE_REF"; else REF=$(git rev-list -1 --before="$CODEBASE_BEFORE" HEAD); fi
-          [ -n "$REF" ] || { echo "::error::Không có commit trước $CODEBASE_BEFORE"; exit 1; }
-          git checkout -q "$REF"; git log -1 --format='Commit %h %ad %s' --date=short
-          cd ../..
-          D=tmp/code/materials/RenderChunk
-          echo "Nội dung $D:"; find $D -type f | sort
-          V=$(find $D -type f -iname '*vertex*.sc' | sort | head -n1)
-          F=$(find $D -type f -iname '*fragment*.sc' | sort | head -n1)
-          W=$(find $D -type f -iname '*varying*' | sort | head -n1)
-          [ -n "$V" ] && [ -n "$F" ] && [ -n "$W" ] || { echo "::error::Thiếu file source trong codebase"; exit 1; }
-          cp "$V" $S/vertex.sc; cp "$F" $S/fragment.sc; cp "$W" $S/varying.def.sc
-          B=$(find tmp/code -type f -name bgfx_shader.sh | head -n1 || true)
-          if [ -n "$B" ]; then cp "$B" $S/bgfx_shader.sh
-          else curl -fsSL -o $S/bgfx_shader.sh https://raw.githubusercontent.com/SurvivalApparatusCommunity/RenderDragonSourceCodeInv/1.20.60/include/bgfx_shader.sh \
-            || curl -fsSL -o $S/bgfx_shader.sh https://raw.githubusercontent.com/SurvivalApparatusCommunication/RenderDragonSourceCodeInv/1.20.60/include/bgfx_shader.sh; fi
+          ls -la vanilla/android
+          [ -f vanilla/android/RenderChunk.material.bin ] || { echo "::error::Thieu vanilla/android/RenderChunk.material.bin"; exit 1; }
 
-      - name: Xuất source vanilla để bạn sửa
-        if: ${{ matrix.platform == 'android' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: RenderChunk-shaders
-          path: project/RenderChunk/shaders
-
-      - name: Biên dịch
+      - name: Bien dich
         run: |
-          lazurite build project --shaderc ./tools/shaderc -p ${{ matrix.platform }} \
-            -o build/${{ matrix.platform }} --skip-validation
+          lazurite build project --shaderc ./tools/shaderc -p android \
+            -o build/android --skip-validation
           find build -type f
 
-      - name: Đóng gói mcpack
+      - name: Dong goi mcpack
         run: |
-          P=pack_${{ matrix.platform }}
-          mkdir -p $P/renderer/materials
-          cp build/${{ matrix.platform }}/*.material.bin $P/renderer/materials/
-          cp manifest.json pack_icon.png $P/
-          (cd $P && zip -r ../GrassWind-${{ matrix.platform }}.mcpack .)
+          mkdir -p pack/renderer/materials
+          cp build/android/*.material.bin pack/renderer/materials/
+          cp manifest.json pack_icon.png pack/
+          (cd pack && zip -r ../GrassWind-android.mcpack .)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: GrassWind-${{ matrix.platform }}
-          path: GrassWind-${{ matrix.platform }}.mcpack
+          name: GrassWind-android
+          path: GrassWind-android.mcpack
