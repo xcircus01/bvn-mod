@@ -52,8 +52,16 @@ jobs:
 
       - name: Lay bgfx_shader.sh
         run: |
+          mkdir -p project/include
           [ -f project/include/bgfx_shader.sh ] && exit 0
-          curl -fsSL -o project/include/bgfx_shader.sh https://raw.githubusercontent.com/SurvivalApparatusCommunity/RenderDragonSourceCodeInv/1.20.60/include/bgfx_shader.sh
+          for R in veka0/bgfx-mcbe bkaradzic/bgfx; do
+            P=$(gh api "repos/$R/git/trees/HEAD?recursive=1" --jq '.tree[].path' 2>/dev/null | grep -E '(^|/)bgfx_shader\.sh$' | head -n1 || true)
+            [ -n "$P" ] || continue
+            echo "Tim thay $R:$P"
+            gh api -H "Accept: application/vnd.github.raw" "repos/$R/contents/$P" > project/include/bgfx_shader.sh && [ -s project/include/bgfx_shader.sh ] && break
+          done
+          [ -s project/include/bgfx_shader.sh ] || { echo "::error::Khong tai duoc bgfx_shader.sh"; exit 1; }
+          head -20 project/include/bgfx_shader.sh
 
       - name: Kiem tra material
         run: |
