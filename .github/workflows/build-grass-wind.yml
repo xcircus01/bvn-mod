@@ -83,6 +83,7 @@ jobs:
 
       - name: Bien dich
         run: |
+          mkdir -p build/android
           lazurite build project --shaderc ./tools/shaderc -p android \
             -o build/android --skip-validation
           find build -type f
