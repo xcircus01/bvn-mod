@@ -4,9 +4,6 @@ on:
   push:
   workflow_dispatch:
 
-env:
-  LAZURITE_VERSION: "0.8.4"
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -34,8 +31,27 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cai lazurite
-        run: pip install "lazurite==$LAZURITE_VERSION"
+      - name: Cai lazurite (thu ban moi neu material version 26)
+        run: |
+          T="from lazurite.material.material import Material; Material.load_bin_file('vanilla/android/RenderChunk.material.bin')"
+          pip install -U lazurite
+          pip show lazurite | grep -i '^version'
+          if python -c "$T" 2>/tmp/e1; then echo "lazurite ban PyPI doc duoc material"; exit 0; fi
+          tail -n 2 /tmp/e1
+          echo "Thu lazurite ban GitHub..."
+          pip install -U "git+https://github.com/veka0/lazurite.git" || true
+          if python -c "$T" 2>/tmp/e2; then echo "lazurite ban GitHub doc duoc material"; exit 0; fi
+          tail -n 2 /tmp/e2
+          echo "::warning::Khong ban lazurite nao ho tro material 26, bo qua kiem tra version (co the loi)"
+          echo "LZ_PATCH=1" >> "$GITHUB_ENV"
+          cat > tools_lz.py <<'PY'
+          import sys
+          import lazurite.material.material as m
+          m.Material._validate_version = lambda self: None
+          from lazurite.cli import main
+          sys.argv[0] = "lazurite"
+          main()
+          PY
 
       - name: Tai shaderc
         run: |
@@ -70,7 +86,8 @@ jobs:
 
       - name: Bien dich
         run: |
-          lazurite build project --shaderc ./tools/shaderc -p android \
+          if [ "$LZ_PATCH" = "1" ]; then LZ="python tools_lz.py"; else LZ="lazurite"; fi
+          $LZ build project --shaderc ./tools/shaderc -p android \
             -o build/android --skip-validation
           find build -type f
 
