@@ -38,6 +38,8 @@ jobs:
           # Material 26 hien tai KHONG co truong 'unknown' (ulong) trong moi buffer.
           sed -i 's/if version >= 26:/if version >= 27:/' "$D/material/buffer.py"
           grep -n "version >= 2" "$D/material/buffer.py"
+          # Xoa bytecode cache: doi 26->27 giu nguyen kich thuoc file, python co the dung .pyc cu
+          find "$D" -name '__pycache__' -type d -prune -exec rm -rf {} +
           python - <<'PY'
           from io import BytesIO
           from lazurite.material.material import Material
