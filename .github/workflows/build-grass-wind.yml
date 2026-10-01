@@ -12,20 +12,333 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Giai nen zip trong repo
+      - name: Tao project (co dung dung + vertex RenderChunk 26.13)
         run: |
-          shopt -s nullglob
-          zips=(*.zip)
-          [ ${#zips[@]} -gt 0 ] || { echo "Khong co file zip o root repo"; exit 1; }
-          for z in "${zips[@]}"; do
-            echo "Giai nen $z"
-            rm -rf "$RUNNER_TEMP/unz" && mkdir -p "$RUNNER_TEMP/unz"
-            unzip -o -q "$z" -d "$RUNNER_TEMP/unz" -x '__MACOSX/*'
-            mapfile -t top < <(find "$RUNNER_TEMP/unz" -mindepth 1 -maxdepth 1)
-            if [ ${#top[@]} -eq 1 ] && [ -d "${top[0]}" ]; then SRC="${top[0]}"; else SRC="$RUNNER_TEMP/unz"; fi
-            cp -a "$SRC"/. .
-          done
-          find project vanilla manifest.json pack_icon.png -maxdepth 3
+          set -e
+          mkdir -p project/include project/RenderChunk/shaders
+          cat > project/include/grass_wind.sh <<'GRASS_WIND_EOF'
+          // ============================================================================
+          // grass_wind.sh  -  tái tạo animation "wind_sway" của infinite_grass_block
+          // bằng vertex shader (bgfx / RenderDragon, Bedrock).
+          //
+          // CHƯA được biên dịch hay chạy thử trong game. Công thức đã kiểm tra bằng
+          // Python với dữ liệu keyframe thật (sai số ngọn cỏ tối đa ~0.3 px của 16).
+          //
+          // Cách hoạt động:
+          //  - Mỗi cọng có 5 đoạn lồng nhau, mỗi đoạn xoay quanh trục X (góc uốn).
+          //  - Góc của đoạn j theo thời gian = trung bình + tổng 6 sóng sin/cos,
+          //    chu kỳ gốc 12 giây (hằng số fit từ 500 bone trong .bbmodel).
+          //  - Hướng của đoạn j = tổng góc các đoạn 0..j (giống bone cha -> con).
+          //  - Đỉnh ở độ cao y (đơn vị block) được dịch theo hướng gió.
+          //  - Mỗi cọng lệch thời gian / biên độ / góc nghiêng một chút (nhiễu mượt theo
+          //    vị trí), tái tạo việc các cọng trong animation gốc không đồng pha.
+          //
+          // Cách dùng trong vertex shader của material vẽ block (xem hướng dẫn kèm theo):
+          //     #include "grass_wind.sh"
+          //     float gy = fract(a_position.y + 0.002) - 0.002;   // độ cao trên nền block
+          //     worldPos.xyz += grassWindDisplace(gy, <giây>, worldPos.xz);
+          // ============================================================================
+
+          #ifndef GRASS_WIND_SH
+          #define GRASS_WIND_SH
+
+          // Chiều dài danh nghĩa của mỗi đoạn, đơn vị block (bbmodel: 2.24..3.2 / 16).
+          #define GRASS_SEG_LEN 0.17
+
+          // Hướng nghiêng trên mặt phẳng XZ. Nhóm "wind" trong bbmodel xoay -135 độ
+          // quanh Y, tương ứng khoảng (-0.7071, -0.7071). Nếu trong game cỏ nghiêng
+          // ngược hướng so với Blockbench, đổi dấu cả hai số.
+          #define GRASS_WIND_DIR vec2(-0.7071, -0.7071)
+
+          // Chu kỳ animation gốc (giây) và độ lệch pha theo không gian.
+          #define GRASS_PERIOD 12.0
+          #define GRASS_PHASE_PER_BLOCK vec2(0.13, 0.09)   // giây lệch pha mỗi block
+
+          // Nhân độ mạnh của gió (1.0 = đúng animation gốc, 0.0 = đứng yên).
+          #define GRASS_STRENGTH 1.0
+
+          // Độ khác nhau giữa các cọng (giống các cọng lệch nhau trong animation gốc).
+          // 1.0 = khớp mức đo được từ .bbmodel, 0.0 = mọi cọng chuyển động y hệt nhau.
+          #define GRASS_VARIATION 1.0
+          #define GRASS_VAR_SHIFT  0.9   // lệch thời gian tối đa (giây)
+          #define GRASS_VAR_AMP    0.16  // biến thiên biên độ (+-)
+          #define GRASS_VAR_OFFSET 2.0   // lệch góc nghiêng (độ)
+
+          // Góc của một đoạn (độ) tại pha w = 2*pi*t/12.
+          // cA/sA: sóng 1..3, cB/sB: sóng 4..6.  amp nhân phần dao động, off cộng vào góc.
+          float grassSegAngle(float mean, vec3 ca, vec3 cb, vec3 sa, vec3 sb,
+                              vec3 cosA, vec3 cosB, vec3 sinA, vec3 sinB,
+                              float amp, float off)
+          {
+              return mean + off + amp * (dot(cosA, ca) + dot(cosB, cb) + dot(sinA, sa) + dot(sinB, sb));
+          }
+
+          // Nhiễu mượt theo vị trí (tổng 2 sóng sin), giá trị trong [-1, 1].
+          // Liên tục nên các đỉnh của cùng một cọng không bị xé, nhưng đổi đủ nhanh
+          // (chu kỳ ~0.25 block) để cọng cạnh nhau (cách 0.1 block) khác nhau.
+          float grassNoise(vec2 p, vec4 f, vec2 ph)
+          {
+              return 0.5 * sin(dot(p, f.xy) + ph.x) + 0.5 * sin(dot(p, f.zw) + ph.y);
+          }
+
+          // Trả về độ dịch chuyển của đỉnh ở độ cao y (block), trong hệ tọa độ
+          // (dọc hướng gió, lên trên). Gồm: x = dịch theo gió, y = độ hạ xuống.
+          vec2 grassWindLocal(float y, float t, float amp, float off)
+          {
+              t = mod(t, GRASS_PERIOD);   // giữ t nhỏ để sin/cos không mất độ chính xác
+              float w = 6.2831853 * t / GRASS_PERIOD;
+
+              vec3 cosA = cos(w * vec3(1.0, 2.0, 3.0));
+              vec3 cosB = cos(w * vec3(4.0, 5.0, 6.0));
+              vec3 sinA = sin(w * vec3(1.0, 2.0, 3.0));
+              vec3 sinB = sin(w * vec3(4.0, 5.0, 6.0));
+
+              float L = GRASS_SEG_LEN;
+              float k = 0.017453293 * GRASS_STRENGTH; // độ -> radian, nhân độ mạnh
+
+              float a0 = grassSegAngle(6.7106,
+                  vec3(1.3931, 0.5911, 1.4990), vec3(0.0813, -0.0944, -0.0591),
+                  vec3(0.4571, 0.6123, 1.2787), vec3(0.2244, -0.7256, -0.5654),
+                  cosA, cosB, sinA, sinB, amp, off);
+              float a1 = grassSegAngle(12.3777,
+                  vec3(2.1003, 0.8865, 2.5134), vec3(0.0818, -0.1705, -0.1077),
+                  vec3(0.7318, 1.0107, 2.1568), vec3(0.3523, -1.2049, -0.9422),
+                  cosA, cosB, sinA, sinB, amp, off);
+              float a2 = grassSegAngle(9.8656,
+                  vec3(0.7892, 0.3694, 1.4593), vec3(-0.0352, -0.1121, -0.0774),
+                  vec3(0.3511, 0.5563, 1.2571), vec3(0.1503, -0.6758, -0.5463),
+                  cosA, cosB, sinA, sinB, amp, off);
+              float a3 = grassSegAngle(7.5929,
+                  vec3(0.0730, 0.1173, 0.6808), vec3(-0.0581, -0.0589, -0.0462),
+                  vec3(0.1054, 0.2440, 0.5837), vec3(0.0315, -0.3002, -0.2647),
+                  cosA, cosB, sinA, sinB, amp, off);
+              float a4 = grassSegAngle(5.9210,
+                  vec3(-0.1961, 0.0159, 0.2392), vec3(-0.0465, -0.0277, -0.0231),
+                  vec3(-0.0084, 0.0782, 0.2063), vec3(-0.0135, -0.0971, -0.1050),
+                  cosA, cosB, sinA, sinB, amp, off);
+
+              // Cộng dồn góc (bone cha -> con) và độ dài từng đoạn tính đến độ cao y.
+              float c0 = a0 * k;
+              float c1 = c0 + a1 * k;
+              float c2 = c1 + a2 * k;
+              float c3 = c2 + a3 * k;
+              float c4 = c3 + a4 * k;
+
+              float l0 = clamp(y,           0.0, L);
+              float l1 = clamp(y - L,       0.0, L);
+              float l2 = clamp(y - 2.0 * L, 0.0, L);
+              float l3 = clamp(y - 3.0 * L, 0.0, L);
+              float l4 = max(y - 4.0 * L, 0.0);        // đoạn cuối không giới hạn
+
+              float dx = l0 * sin(c0) + l1 * sin(c1) + l2 * sin(c2) + l3 * sin(c3) + l4 * sin(c4);
+              float dy = l0 * cos(c0) + l1 * cos(c1) + l2 * cos(c2) + l3 * cos(c3) + l4 * cos(c4);
+
+              return vec2(dx, dy - y);
+          }
+
+          // Dùng hàm này: trả về vec3 độ dịch trong không gian thế giới (đơn vị block).
+          // y     : độ cao đỉnh trên nền block, 0..1
+          // t     : thời gian tính bằng giây
+          // posXZ : tọa độ thế giới (để lệch pha giữa các block)
+          vec3 grassWindDisplace(float y, float t, vec2 posXZ)
+          {
+              float phase = dot(posXZ, GRASS_PHASE_PER_BLOCK);
+
+              // Biến thiên riêng của từng cọng, suy ra từ vị trí (tọa độ thế giới, block).
+              float v  = GRASS_VARIATION;
+              float sh = v * GRASS_VAR_SHIFT  * grassNoise(posXZ, vec4( 23.0, 17.0, -19.0, -29.0), vec2(0.7, 2.1));
+              float am = 1.0 + v * GRASS_VAR_AMP * grassNoise(posXZ, vec4( 31.0,-21.0,  17.0, -27.0), vec2(1.3, 4.0));
+              float of = v * GRASS_VAR_OFFSET * grassNoise(posXZ, vec4(-27.0, 19.0,  21.0,  33.0), vec2(2.9, 5.2));
+
+              vec2 d = grassWindLocal(max(y, 0.0), t + phase + sh, am, of);
+              return vec3(GRASS_WIND_DIR.x * d.x, d.y, GRASS_WIND_DIR.y * d.x);
+          }
+
+          #endif // GRASS_WIND_SH
+          GRASS_WIND_EOF
+          cat > project/RenderChunk/shaders/vertex.sc <<'VERTEX_EOF'
+          $input a_color0, a_texcoord1, a_position, a_texcoord0, i_data1, i_data2, i_data3
+          $output v_clipPosition, v_color0, v_ditheringAndMaskTinting, v_fog, v_lightmapUV, v_texcoord0, v_worldPos, v_worldPosition
+
+          #include <bgfx_shader.sh>
+          #include "grass_wind.sh"
+
+          uniform vec4 FogAndDistanceControl;
+          uniform vec4 FogColor;
+          uniform vec4 MeshContext;
+          uniform vec4 RenderChunkFogAlpha;
+          uniform vec4 SubPixelOffset;
+          uniform vec4 ViewPositionAndTime;
+
+          // Vertex shader RenderChunk cua Minecraft 26.13 (material format 25), doi chieu
+          // tu GLSL vanilla; chi them hieu ung gio cho co (grassWindDisplace).
+          void main() {
+              // ---- vi tri the gioi ----
+              vec3 worldPos;
+          #ifdef INSTANCING__ON
+              worldPos = vec3(
+                  dot(i_data1.xyz, a_position) + i_data1.w,
+                  dot(i_data2.xyz, a_position) + i_data2.w,
+                  dot(i_data3.xyz, a_position) + i_data3.w);
+          #else
+              worldPos = mul(u_model[0], vec4(a_position, 1.0)).xyz;
+          #endif
+
+              // ---- GIO CHO CO: dinh o do cao nguyen (nen / dinh block) co gy = 0 -> dung yen ----
+          #ifdef RENDER_AS_BILLBOARDS__OFF
+              float gy = fract(a_position.y + 0.002) - 0.002;
+              worldPos += grassWindDisplace(gy, ViewPositionAndTime.w, worldPos.xz);
+          #endif
+
+              // ---- billboard ----
+              vec3 finalPos = worldPos;
+              vec4 color = a_color0;
+          #ifdef RENDER_AS_BILLBOARDS__ON
+              vec3 c = worldPos + vec3(0.5, 0.5, 0.5);
+              vec3 fwd = normalize(c - ViewPositionAndTime.xyz);
+              vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), fwd));
+              finalPos = c - ((cross(fwd, right) * (a_color0.z - 0.5)) + (right * (a_color0.x - 0.5)));
+              color = vec4(1.0, 1.0, 1.0, 1.0);
+          #endif
+
+              // ---- fog ----
+              vec4 fogCtl = FogAndDistanceControl;
+              if (MeshContext.x > 0.5) {
+                  fogCtl = vec4(0.99, 1.0, 100000.0, 100000.0);
+              }
+              float dist = length(ViewPositionAndTime.xyz - finalPos);
+
+          #ifdef TRANSPARENT_PASS
+              if (a_color0.w < 0.95) {
+                  color.w = mix(a_color0.w, 1.0, clamp(dist / fogCtl.w, 0.0, 1.0));
+              }
+          #endif
+
+              // ---- projection co jitter ----
+              mat4 proj = u_proj;
+          #if BGFX_SHADER_LANGUAGE_GLSL
+              proj[2][0] += SubPixelOffset.x;
+              proj[2][1] -= SubPixelOffset.y;
+          #else
+              proj[0][2] += SubPixelOffset.x;
+              proj[1][2] -= SubPixelOffset.y;
+          #endif
+              vec4 clipPos = mul(proj, mul(u_view, vec4(finalPos, 1.0)));
+
+              uvec2 t1 = uvec2(round(a_texcoord1 * 65535.0));
+
+          #if defined(ALPHA_TEST_PASS) || defined(TRANSPARENT_PASS)
+              v_clipPosition = clipPos;
+              v_worldPosition = vec4(worldPos, 0.0);
+          #endif
+              v_color0 = color;
+              v_ditheringAndMaskTinting = vec2(
+                  (t1.x & 256u) != 0u ? 1.0 : 0.0,
+                  (t1.y & 256u) != 0u ? 1.0 : 0.0);
+              v_fog = vec4(FogColor.xyz,
+                  clamp((((dist / fogCtl.z) + RenderChunkFogAlpha.x) - fogCtl.x) / (fogCtl.y - fogCtl.x), 0.0, 1.0));
+              v_lightmapUV = vec2(float((t1.y >> 4u) & 15u), float(t1.y & 15u)) * 0.066666670143604278564453125;
+              v_texcoord0 = a_texcoord0;      // 26.13: UV la float san, KHONG giai ma 16-bit
+              v_worldPos = worldPos;
+              gl_Position = clipPos;
+          }
+          VERTEX_EOF
+          cat > project/RenderChunk/shaders/varying.def.sc <<'VARYING_EOF'
+          vec4 a_color0    : COLOR0;
+          vec2 a_texcoord1 : TEXCOORD1;
+          vec3 a_position  : POSITION;
+          vec2 a_texcoord0 : TEXCOORD0;
+
+          vec4 i_data1 : TEXCOORD7;
+          vec4 i_data2 : TEXCOORD6;
+          vec4 i_data3 : TEXCOORD5;
+
+          #if defined(ALPHA_TEST_PASS) || defined(TRANSPARENT_PASS)
+          vec4          v_clipPosition            : COLOR1;
+          #endif
+          vec4          v_color0                  : COLOR0;
+          vec2          v_ditheringAndMaskTinting : TEXCOORD2;
+          vec4          v_fog                     : COLOR2;
+          vec2          v_lightmapUV              : TEXCOORD1;
+          centroid vec2 v_texcoord0               : TEXCOORD0;
+          vec3          v_worldPos                : TEXCOORD3;
+          #if defined(ALPHA_TEST_PASS) || defined(TRANSPARENT_PASS)
+          vec4          v_worldPosition           : COLOR3;
+          #endif
+          VARYING_EOF
+          cat > project/RenderChunk/config.json <<'CONFIG_EOF'
+          {
+            "compiler": {
+              "type": "shaderc"
+            }
+          }
+          CONFIG_EOF
+          cat > project/project.json <<'PROJECT_EOF'
+          {
+            "base_profile": {
+              "include_patterns": [
+                "RenderChunk"
+              ],
+              "include_search_paths": [
+                "include"
+              ]
+            },
+            "profiles": {
+              "windows": {
+                "platforms": [
+                  "Direct3D_SM65"
+                ],
+                "merge_source": [
+                  "../vanilla/windows/"
+                ]
+              },
+              "android": {
+                "platforms": [
+                  "ESSL_310"
+                ],
+                "merge_source": [
+                  "../vanilla/android/"
+                ]
+              }
+            }
+          }
+          PROJECT_EOF
+          cat > manifest.json <<'MANIFEST_EOF'
+          {
+            "format_version": 2,
+            "header": {
+              "name": "Grass Wind Shader",
+              "description": "Gi\u00f3 cho c\u1ecf - build b\u1eb1ng GitHub Actions",
+              "uuid": "34c6c53b-9bf8-4c27-a589-83f3b69efb9a",
+              "version": [
+                1,
+                0,
+                0
+              ],
+              "min_engine_version": [
+                1,
+                21,
+                0
+              ]
+            },
+            "modules": [
+              {
+                "type": "resources",
+                "uuid": "30c9d748-2969-48fa-8908-69e8166c1257",
+                "version": [
+                  1,
+                  0,
+                  0
+                ]
+              }
+            ]
+          }
+          MANIFEST_EOF
+          [ -f vanilla/android/RenderChunk.material.bin ] || { echo "::error::Can commit vanilla/android/RenderChunk.material.bin (material 26.13 Android)"; exit 1; }
+          [ -f pack_icon.png ] || python - <<'PY'
+          import base64
+          open("pack_icon.png","wb").write(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
+          PY
 
       - uses: actions/setup-python@v5
         with:
