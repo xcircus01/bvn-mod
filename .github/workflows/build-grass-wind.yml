@@ -1,4 +1,4 @@
-name: Build Bedrock Shader (Android)
+name: Build Bedrock Shader (Android 26.13)
 
 on:
   push:
@@ -37,6 +37,16 @@ jobs:
           D=$(python -c "import lazurite,os;print(os.path.dirname(lazurite.__file__))")
           # Material 26 hien tai KHONG co truong 'unknown' (ulong) trong moi buffer.
           sed -i 's/if version >= 26:/if version >= 27:/' "$D/material/buffer.py"
+          # Material 26.13 (format 25) con nen tang Nvn (lazurite 0.11 chi biet format 25 SAU 26.40.30 da bo Nvn).
+          python - <<'PY'
+          import re, lazurite.material.platform as P
+          f = P.__file__
+          s = open(f).read()
+          old = "                cls.Vulkan: 10,\n                cls.PSSL: 11,\n                cls.Unknown: 12,\n"
+          new = "                cls.Vulkan: 10,\n                cls.Nvn: 11,\n                cls.PSSL: 12,\n                cls.Unknown: 13,\n"
+          assert old in s or new in s, "khong tim thay mapping platform de va"
+          open(f, "w").write(s.replace(old, new))
+          PY
           grep -n "version >= 2" "$D/material/buffer.py"
           # Xoa bytecode cache: doi 26->27 giu nguyen kich thuoc file, python co the dung .pyc cu
           find "$D" -name '__pycache__' -type d -prune -exec rm -rf {} +
@@ -80,6 +90,21 @@ jobs:
         run: |
           ls -la vanilla/android
           [ -f vanilla/android/RenderChunk.material.bin ] || { echo "::error::Thieu vanilla/android/RenderChunk.material.bin"; exit 1; }
+
+      - name: Khoi phuc source RenderChunk 26.13 (de doi chieu)
+        continue-on-error: true
+        run: |
+          mkdir -p restored
+          lazurite restore vanilla/android/RenderChunk.material.bin -o restored --split-passes
+          find restored -type f | head -60
+
+      - name: Xuat source khoi phuc
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RenderChunk-26.13-restored
+          path: restored
+          if-no-files-found: ignore
 
       - name: Bien dich
         run: |
