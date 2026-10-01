@@ -27,9 +27,11 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - uses: android-actions/setup-android@v3
-
-      - run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+      - name: Android SDK
+        run: |
+          SM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | tail -n 1)
+          yes | $SM --licenses > /dev/null || true
+          $SM "platforms;android-34" "build-tools;34.0.0"
 
       - name: Build
         working-directory: ${{ env.PROJECT_DIR }}
